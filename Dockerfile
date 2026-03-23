@@ -1,7 +1,7 @@
 FROM debian:13.4
 
-RUN apt update
-RUN apt install -y nodejs npm python3 python3-pip ripgrep ffmpeg gcc python3-dev libffi-dev
+RUN apt-get update
+RUN apt-get install -y nodejs npm python3 python3-pip ripgrep ffmpeg gcc python3-dev libffi-dev
 
 COPY . /opt/hermes
 WORKDIR /opt/hermes
