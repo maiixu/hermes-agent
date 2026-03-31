@@ -152,6 +152,28 @@ class PluginContext:
         self._manager._plugin_tool_names.add(name)
         logger.debug("Plugin %s registered tool: %s", self.manifest.name, name)
 
+    # -- memory provider registration ----------------------------------------
+
+    def register_memory_provider(self, provider) -> None:
+        """Register a memory provider (must implement MemoryProvider ABC).
+
+        The provider will be added to the MemoryManager during agent init.
+        Providers registered this way are additive — they never disable
+        the built-in MEMORY.md/USER.md store.
+
+        Example plugin __init__.py::
+
+            from my_memory_backend import MyMemoryProvider
+
+            def register(ctx):
+                ctx.register_memory_provider(MyMemoryProvider())
+        """
+        self._manager._memory_providers.append(provider)
+        logger.debug(
+            "Plugin %s registered memory provider: %s",
+            self.manifest.name, getattr(provider, "name", "unknown"),
+        )
+
     # -- message injection --------------------------------------------------
 
     def inject_message(self, content: str, role: str = "user") -> bool:
@@ -211,6 +233,7 @@ class PluginManager:
         self._plugins: Dict[str, LoadedPlugin] = {}
         self._hooks: Dict[str, List[Callable]] = {}
         self._plugin_tool_names: Set[str] = set()
+        self._memory_providers: List = []  # MemoryProvider instances from plugins
         self._discovered: bool = False
         self._cli_ref = None  # Set by CLI after plugin discovery
 
@@ -557,3 +580,13 @@ def get_plugin_toolsets() -> List[tuple]:
         result.append((ts_key, label, desc))
 
     return result
+
+
+def get_plugin_memory_providers() -> List:
+    """Return MemoryProvider instances registered by plugins.
+
+    Called during AIAgent init to add plugin memory providers to
+    the MemoryManager alongside built-in providers.
+    """
+    manager = get_plugin_manager()
+    return list(manager._memory_providers)

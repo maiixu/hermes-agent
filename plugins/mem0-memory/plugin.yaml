@@ -1,0 +1,7 @@
+name: mem0-memory
+version: 1.0.0
+description: >
+  Long-term memory via Mem0 Platform — server-side LLM fact extraction,
+  semantic search with reranking, and automatic deduplication.
+requires_env:
+  - MEM0_API_KEY

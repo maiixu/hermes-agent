@@ -1,0 +1,7 @@
+name: openviking-memory
+version: 1.0.0
+description: >
+  Read-only memory via OpenViking — semantic search, URI-based content
+  reading, and filesystem browsing over a self-hosted knowledge server.
+requires_env:
+  - OPENVIKING_ENDPOINT

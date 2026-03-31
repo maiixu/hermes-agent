@@ -1,0 +1,8 @@
+name: hindsight-memory
+version: 1.0.0
+description: >
+  Long-term memory via Hindsight — knowledge graph with entity resolution,
+  multi-strategy retrieval (semantic + BM25 + graph + temporal), and
+  cross-encoder reranking. Cloud or local mode.
+requires_env:
+  - HINDSIGHT_API_KEY

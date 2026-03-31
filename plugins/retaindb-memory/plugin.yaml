@@ -1,0 +1,7 @@
+name: retaindb-memory
+version: 1.0.0
+description: >
+  Cross-session memory via RetainDB — durable write-behind queue, semantic
+  search with deduplication, user identity resolution, and profile retrieval.
+requires_env:
+  - RETAINDB_API_KEY

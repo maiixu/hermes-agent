@@ -1,0 +1,6 @@
+name: cognitive-memory
+version: 1.0.0
+description: >
+  Semantic memory with vector embeddings, auto-classification, contradiction
+  detection, importance decay, and time-based forgetting. Local SQLite storage,
+  requires litellm for embeddings.
