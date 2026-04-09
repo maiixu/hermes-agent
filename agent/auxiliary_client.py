@@ -1703,6 +1703,25 @@ def resolve_vision_provider_client(
                     )
                     return _finalize(
                         main_provider, rpc_client, rpc_model or vision_model)
+                # Exotic provider (DeepSeek, Alibaba, named custom, etc.)
+                # Skip providers that don't use OpenAI-compatible endpoints
+                # (e.g. Bedrock uses Converse API via boto3, not OpenAI SDK).
+                if main_provider in ("bedrock",):
+                    logger.debug(
+                        "Vision auto-detect: skipping non-OpenAI provider %s, "
+                        "falling back to aggregators",
+                        main_provider,
+                    )
+                else:
+                    rpc_client, rpc_model = resolve_provider_client(
+                        main_provider, main_model)
+                    if rpc_client is not None:
+                        logger.info(
+                            "Vision auto-detect: using active provider %s (%s)",
+                            main_provider, rpc_model or main_model,
+                        )
+                        return _finalize(
+                            main_provider, rpc_client, rpc_model or main_model)
 
         # Fall back through aggregators.
         for candidate in _VISION_AUTO_PROVIDER_ORDER:

@@ -135,6 +135,10 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     "xiaomi": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="XIAOMI_BASE_URL",
+    "bedrock": HermesOverlay(
+        transport="bedrock_converse",
+        extra_env_vars=("AWS_BEARER_TOKEN_BEDROCK",),
+        base_url_env_var="AWS_BEDROCK_BASE_URL",
     ),
 }
 
@@ -229,6 +233,11 @@ ALIASES: Dict[str, str] = {
     # xiaomi
     "mimo": "xiaomi",
     "xiaomi-mimo": "xiaomi",
+    # bedrock
+    "aws-bedrock": "bedrock",
+    "aws": "bedrock",
+    "amazon-bedrock": "bedrock",
+    "amazon": "bedrock",
 
     # Local server aliases → virtual "local" concept (resolved via user config)
     "lmstudio": "lmstudio",
@@ -251,6 +260,7 @@ _LABEL_OVERRIDES: Dict[str, str] = {
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
     "xiaomi": "Xiaomi MiMo",
+    "bedrock": "Amazon Bedrock",
     "local": "Local endpoint",
 }
 
@@ -261,6 +271,7 @@ TRANSPORT_TO_API_MODE: Dict[str, str] = {
     "openai_chat": "chat_completions",
     "anthropic_messages": "anthropic_messages",
     "codex_responses": "codex_responses",
+    "bedrock_converse": "bedrock_converse",
 }
 
 

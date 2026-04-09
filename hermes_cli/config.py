@@ -880,6 +880,16 @@ OPTIONAL_ENV_VARS = {
     "XIAOMI_BASE_URL": {
         "description": "Xiaomi MiMo base URL override (default: https://api.xiaomimimo.com/v1)",
         "prompt": "Xiaomi base URL (leave empty for default)",
+    "AWS_BEARER_TOKEN_BEDROCK": {
+        "description": "Amazon Bedrock API key (Bearer token for OpenAI-compatible endpoint)",
+        "prompt": "Amazon Bedrock API Key",
+        "url": "https://console.aws.amazon.com/bedrock/",
+        "password": True,
+        "category": "provider",
+    },
+    "AWS_BEDROCK_REGION": {
+        "description": "AWS region for Bedrock (default: us-east-1)",
+        "prompt": "AWS Bedrock Region (leave empty for us-east-1)",
         "url": None,
         "password": False,
         "category": "provider",
