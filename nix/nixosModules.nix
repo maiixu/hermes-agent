@@ -680,28 +680,17 @@ HERMES_CONTAINER_MODE_EOF
                 symlinkPath = "${userHome}/.hermes";
                 target = "${cfg.stateDir}/.hermes";
               in ''
-                if [ -L "${symlinkPath}" ]; then
-                  # Already a symlink — update target if needed
-                  current_target=$(readlink "${symlinkPath}")
-                  if [ "$current_target" != "${target}" ]; then
-                    ln -sfn "${target}" "${symlinkPath}"
-                    chown -h ${user}:${cfg.group} "${symlinkPath}"
-                  fi
-                elif [ -d "${symlinkPath}" ]; then
-                  # Existing real directory — backup and replace
+                if [ -d "${symlinkPath}" ] && [ ! -L "${symlinkPath}" ]; then
+                  # Real directory — back it up, then create symlink.
+                  # (ln -sfn cannot atomically replace a directory.)
                   _backup="${symlinkPath}.bak.$(date +%s)"
                   echo "hermes-agent: backing up existing ${symlinkPath} to $_backup"
                   mv "${symlinkPath}" "$_backup"
-                  ln -sfn "${target}" "${symlinkPath}"
-                  chown -h ${user}:${cfg.group} "${symlinkPath}"
-                elif [ -e "${symlinkPath}" ]; then
-                  # Some other file type — skip with warning
-                  echo "hermes-agent: WARNING: ${symlinkPath} exists but is not a directory or symlink, skipping"
-                else
-                  # Does not exist — create symlink
-                  ln -sfn "${target}" "${symlinkPath}"
-                  chown -h ${user}:${cfg.group} "${symlinkPath}"
                 fi
+                # For everything else (existing symlink, doesn't exist, etc.)
+                # ln -sfn handles it: replaces symlinks, creates new ones.
+                ln -sfn "${target}" "${symlinkPath}"
+                chown -h ${user}:${cfg.group} "${symlinkPath}"
               '') cfg.container.hostUsers))}
 
           # Seed auth file if provided

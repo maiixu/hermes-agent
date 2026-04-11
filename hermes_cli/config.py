@@ -159,7 +159,7 @@ def _is_inside_container() -> bool:
             cgroup = f.read()
             if "docker" in cgroup or "podman" in cgroup or "/lxc/" in cgroup:
                 return True
-    except (OSError, IOError):
+    except OSError:
         pass
     return False
 
@@ -191,20 +191,21 @@ def get_container_exec_info() -> Optional[dict]:
                 if "=" in line and not line.startswith("#"):
                     key, _, value = line.partition("=")
                     info[key.strip()] = value.strip()
-
-        backend = info.get("backend", "docker")
-        container_name = info.get("container_name", "hermes-agent")
-        exec_user = info.get("exec_user", "hermes")
-        hermes_bin = info.get("hermes_bin", "/data/current-package/bin/hermes")
-
-        return {
-            "backend": backend,
-            "container_name": container_name,
-            "exec_user": exec_user,
-            "hermes_bin": hermes_bin,
-        }
-    except (OSError, IOError):
+    except FileNotFoundError:
         return None
+    # All other exceptions (PermissionError, malformed data, etc.) propagate
+
+    backend = info.get("backend", "docker")
+    container_name = info.get("container_name", "hermes-agent")
+    exec_user = info.get("exec_user", "hermes")
+    hermes_bin = info.get("hermes_bin", "/data/current-package/bin/hermes")
+
+    return {
+        "backend": backend,
+        "container_name": container_name,
+        "exec_user": exec_user,
+        "hermes_bin": hermes_bin,
+    }
 
 
 # =============================================================================

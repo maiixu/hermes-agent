@@ -528,24 +528,37 @@ def _resolve_last_cli_session() -> Optional[str]:
     return None
 
 
+def _probe_container(cmd: list, backend: str, via_sudo: bool = False):
+    """Run a container inspect probe, returning the CompletedProcess.
+
+    Catches TimeoutExpired specifically for a human-readable message;
+    all other exceptions propagate naturally.
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        label = f"sudo {backend}" if via_sudo else backend
+        print(
+            f"Error: timed out waiting for {label} to respond.\n"
+            f"The {backend} daemon may be unresponsive or starting up.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _exec_in_container(container_info: dict, cli_args: list):
-    """Route a CLI invocation into the managed container.
+    """Replace the current process with a command inside the managed container.
 
-    Uses subprocess.run so we can detect docker-level failures (container
-    not running, user not found, etc.) and retry. On the happy path the
-    exit code from the containerised hermes is propagated directly.
-
-    Failure behaviour:
-    - TTY: spinner for up to 5s, then hard fail (exit 1)
-    - Non-TTY: silent retry for 10s, then exit 126
+    Probes whether sudo is needed (rootful containers), then os.execvp
+    into the container. On success the Python process is replaced entirely
+    and the container's exit code becomes the process exit code (OS semantics).
+    On failure, OSError propagates naturally.
 
     Args:
         container_info: dict with backend, container_name, exec_user, hermes_bin
         cli_args: the original CLI arguments (everything after 'hermes')
     """
     import shutil
-    import subprocess
-    import time
 
     backend = container_info["backend"]
     container_name = container_info["container_name"]
@@ -558,32 +571,30 @@ def _exec_in_container(container_info: dict, cli_args: list):
               file=sys.stderr)
         sys.exit(1)
 
-    # The NixOS systemd service runs containers as root. Docker users
-    # typically have group-based socket access, but Podman rootful
-    # containers require sudo. Probe whether the runtime can see the
-    # container; if not, retry via sudo.
-    needs_sudo = False
-    probe = subprocess.run(
-        [runtime, "inspect", "--format", "ok", container_name],
-        capture_output=True, text=True, timeout=5,
+    # Rootful containers (NixOS systemd service) are invisible to unprivileged
+    # users — Podman uses per-user namespaces, Docker needs group access.
+    # Probe whether the runtime can see the container; if not, try via sudo.
+    sudo_path = None
+    probe = _probe_container(
+        [runtime, "inspect", "--format", "ok", container_name], backend,
     )
     if probe.returncode != 0:
-        sudo = shutil.which("sudo")
-        if sudo:
-            probe2 = subprocess.run(
-                [sudo, "-n", runtime, "inspect", "--format", "ok", container_name],
-                capture_output=True, text=True, timeout=5,
+        sudo_path = shutil.which("sudo")
+        if sudo_path:
+            probe2 = _probe_container(
+                [sudo_path, "-n", runtime, "inspect", "--format", "ok", container_name],
+                backend, via_sudo=True,
             )
-            if probe2.returncode == 0:
-                needs_sudo = True
-            else:
+            if probe2.returncode != 0:
                 print(
                     f"Error: container '{container_name}' not found via {backend}.\n"
                     f"\n"
-                    f"The NixOS service runs the container as root. Your user cannot\n"
-                    f"see it because {backend} uses per-user namespaces.\n"
+                    f"The container is likely running as root. Your user cannot see it\n"
+                    f"because {backend} uses per-user namespaces. Grant passwordless\n"
+                    f"sudo for {backend} — the -n (non-interactive) flag is required\n"
+                    f"because a password prompt would hang or break piped commands.\n"
                     f"\n"
-                    f"Fix: grant passwordless sudo for {backend}:\n"
+                    f"On NixOS:\n"
                     f"\n"
                     f'  security.sudo.extraRules = [{{\n'
                     f'    users = [ "{os.getenv("USER", "your-user")}" ];\n'
@@ -605,14 +616,13 @@ def _exec_in_container(container_info: dict, cli_args: list):
     is_tty = sys.stdin.isatty()
     tty_flags = ["-it"] if is_tty else ["-i"]
 
-    # Forward terminal environment variables
     env_flags = []
     for var in ("TERM", "COLORTERM", "LANG", "LC_ALL"):
         val = os.environ.get(var)
         if val:
             env_flags.extend(["-e", f"{var}={val}"])
 
-    cmd_prefix = [sudo, "-n", runtime] if needs_sudo else [runtime]
+    cmd_prefix = [sudo_path, "-n", runtime] if sudo_path else [runtime]
     exec_cmd = (
         cmd_prefix + ["exec"]
         + tty_flags
@@ -622,37 +632,7 @@ def _exec_in_container(container_info: dict, cli_args: list):
         + cli_args
     )
 
-    max_retries = 5 if is_tty else 10
-    for attempt in range(max_retries):
-        result = subprocess.run(exec_cmd)
-        if result.returncode == 0:
-            sys.exit(0)
-
-        # Exit code 125/126/127 from docker exec = container-level failure
-        # (not running, user not found, command not found). Retry these.
-        if result.returncode not in (125, 126, 127):
-            # Hermes itself exited non-zero — propagate as-is
-            sys.exit(result.returncode)
-
-        # Container-level failure — retry
-        if attempt < max_retries - 1:
-            if is_tty and attempt == 0:
-                print("Waiting for container...", end="", flush=True,
-                      file=sys.stderr)
-            elif is_tty:
-                print(".", end="", flush=True, file=sys.stderr)
-            time.sleep(1)
-        else:
-            if is_tty:
-                print(file=sys.stderr)  # newline after dots
-                print(
-                    f"Error: container '{container_name}' is not reachable "
-                    f"via {backend}. Is the hermes-agent service running?",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            else:
-                sys.exit(126)
+    os.execvp(exec_cmd[0], exec_cmd)
 
 
 def _resolve_session_by_name_or_id(name_or_id: str) -> Optional[str]:
@@ -5763,16 +5743,13 @@ Examples:
     # the managed container.  This MUST run before parse_args() so that
     # --help, unrecognised flags, and every subcommand are forwarded
     # transparently instead of being intercepted by argparse on the host.
-    try:
-        from hermes_cli.config import get_container_exec_info
-        container_info = get_container_exec_info()
-        if container_info:
-            _exec_in_container(container_info, sys.argv[1:])
-            sys.exit(1)  # exec failed if we reach here
-    except SystemExit:
-        raise  # Re-raise sys.exit from _exec_in_container
-    except Exception:
-        pass  # Container routing unavailable, proceed locally
+    from hermes_cli.config import get_container_exec_info
+    container_info = get_container_exec_info()
+    if container_info:
+        _exec_in_container(container_info, sys.argv[1:])
+        # Unreachable: os.execvp never returns on success (process is replaced)
+        # and raises OSError on failure (which propagates as a traceback).
+        sys.exit(1)
 
     _processed_argv = _coalesce_session_name_args(sys.argv[1:])
     args = parser.parse_args(_processed_argv)

@@ -5,6 +5,7 @@ writes a .container-mode metadata file. The host CLI detects this and
 execs into the container instead of running locally.
 """
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -173,182 +174,169 @@ def test_get_container_exec_info_docker_backend(container_env):
     assert info["hermes_bin"] == "/opt/hermes/bin/hermes"
 
 
+def test_get_container_exec_info_crashes_on_permission_error(container_env):
+    """PermissionError propagates instead of being silently swallowed."""
+    with patch("hermes_cli.config._is_inside_container", return_value=False), \
+         patch("builtins.open", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError):
+            get_container_exec_info()
+
+
 # =============================================================================
 # _exec_in_container
 # =============================================================================
 
 
-def test_exec_in_container_constructs_correct_command():
-    """Exec command includes -u exec_user, -e env vars, TTY flags."""
-    from hermes_cli.main import _exec_in_container
-
-    container_info = {
+@pytest.fixture
+def docker_container_info():
+    return {
         "backend": "docker",
         "container_name": "hermes-agent",
         "exec_user": "hermes",
         "hermes_bin": "/data/current-package/bin/hermes",
     }
 
-    with patch("shutil.which", return_value="/usr/bin/docker"), \
-         patch("subprocess.run") as mock_run, \
-         patch("sys.stdin") as mock_stdin, \
-         patch.dict(os.environ, {"TERM": "xterm-256color", "LANG": "en_US.UTF-8"},
-                    clear=False), \
-         pytest.raises(SystemExit) as exc_info:
-        mock_stdin.isatty.return_value = True
-        # First call = probe (inspect), second = exec
-        mock_run.return_value = MagicMock(returncode=0)
 
-        _exec_in_container(container_info, ["chat", "-m", "opus"])
-
-    assert exc_info.value.code == 0
-    assert mock_run.call_count == 2  # probe + exec
-    cmd = mock_run.call_args_list[1][0][0]  # second call = exec
-    # Runtime and exec
-    assert cmd[0] == "/usr/bin/docker"
-    assert cmd[1] == "exec"
-    # TTY flags
-    assert "-it" in cmd
-    # User flag
-    idx_u = cmd.index("-u")
-    assert cmd[idx_u + 1] == "hermes"
-    # Env passthrough
-    e_indices = [i for i, v in enumerate(cmd) if v == "-e"]
-    e_values = [cmd[i + 1] for i in e_indices]
-    assert "TERM=xterm-256color" in e_values
-    assert "LANG=en_US.UTF-8" in e_values
-    # Container + binary + args
-    assert "hermes-agent" in cmd
-    assert "/data/current-package/bin/hermes" in cmd
-    assert "chat" in cmd
-
-
-def test_exec_in_container_non_tty_uses_i_only():
-    """Non-TTY mode uses -i instead of -it."""
-    from hermes_cli.main import _exec_in_container
-
-    container_info = {
-        "backend": "docker",
-        "container_name": "hermes-agent",
-        "exec_user": "hermes",
-        "hermes_bin": "/data/current-package/bin/hermes",
-    }
-
-    with patch("shutil.which", return_value="/usr/bin/docker"), \
-         patch("subprocess.run") as mock_run, \
-         patch("sys.stdin") as mock_stdin, \
-         pytest.raises(SystemExit):
-        mock_stdin.isatty.return_value = False
-        mock_run.return_value = MagicMock(returncode=0)
-
-        _exec_in_container(container_info, ["sessions", "list"])
-
-    cmd = mock_run.call_args[0][0]
-    # Should have -i but NOT -it
-    assert "-i" in cmd
-    assert "-it" not in cmd
-
-
-def test_exec_in_container_no_runtime_hard_fails():
-    """Hard fails when runtime not found (no fallback)."""
-    from hermes_cli.main import _exec_in_container
-
-    container_info = {
+@pytest.fixture
+def podman_container_info():
+    return {
         "backend": "podman",
         "container_name": "hermes-agent",
         "exec_user": "hermes",
         "hermes_bin": "/data/current-package/bin/hermes",
     }
 
-    with patch("shutil.which", return_value=None), \
+
+def test_exec_in_container_calls_execvp(docker_container_info):
+    """Verifies os.execvp is called with correct args: runtime, tty flags,
+    user, env vars, container name, binary, and CLI args."""
+    from hermes_cli.main import _exec_in_container
+
+    with patch("shutil.which", return_value="/usr/bin/docker"), \
          patch("subprocess.run") as mock_run, \
          patch("sys.stdin") as mock_stdin, \
-         pytest.raises(SystemExit) as exc_info:
+         patch("os.execvp") as mock_execvp, \
+         patch.dict(os.environ, {"TERM": "xterm-256color", "LANG": "en_US.UTF-8"},
+                    clear=False):
         mock_stdin.isatty.return_value = True
-        _exec_in_container(container_info, ["chat"])
+        mock_run.return_value = MagicMock(returncode=0)
+
+        _exec_in_container(docker_container_info, ["chat", "-m", "opus"])
+
+    mock_execvp.assert_called_once()
+    cmd = mock_execvp.call_args[0][1]
+    assert cmd[0] == "/usr/bin/docker"
+    assert cmd[1] == "exec"
+    assert "-it" in cmd
+    idx_u = cmd.index("-u")
+    assert cmd[idx_u + 1] == "hermes"
+    e_indices = [i for i, v in enumerate(cmd) if v == "-e"]
+    e_values = [cmd[i + 1] for i in e_indices]
+    assert "TERM=xterm-256color" in e_values
+    assert "LANG=en_US.UTF-8" in e_values
+    assert "hermes-agent" in cmd
+    assert "/data/current-package/bin/hermes" in cmd
+    assert "chat" in cmd
+
+
+def test_exec_in_container_non_tty_uses_i_only(docker_container_info):
+    """Non-TTY mode uses -i instead of -it."""
+    from hermes_cli.main import _exec_in_container
+
+    with patch("shutil.which", return_value="/usr/bin/docker"), \
+         patch("subprocess.run") as mock_run, \
+         patch("sys.stdin") as mock_stdin, \
+         patch("os.execvp") as mock_execvp:
+        mock_stdin.isatty.return_value = False
+        mock_run.return_value = MagicMock(returncode=0)
+
+        _exec_in_container(docker_container_info, ["sessions", "list"])
+
+    cmd = mock_execvp.call_args[0][1]
+    assert "-i" in cmd
+    assert "-it" not in cmd
+
+
+def test_exec_in_container_no_runtime_hard_fails(podman_container_info):
+    """Hard fails when runtime not found (no fallback)."""
+    from hermes_cli.main import _exec_in_container
+
+    with patch("shutil.which", return_value=None), \
+         patch("subprocess.run") as mock_run, \
+         patch("os.execvp") as mock_execvp, \
+         pytest.raises(SystemExit) as exc_info:
+        _exec_in_container(podman_container_info, ["chat"])
 
     mock_run.assert_not_called()
+    mock_execvp.assert_not_called()
     assert exc_info.value.code != 0
 
 
-def test_exec_in_container_tty_retries_on_container_failure():
-    """TTY mode retries on docker exit codes 125-127, then hard fails."""
+def test_exec_in_container_sudo_probe_sets_prefix(podman_container_info):
+    """When first probe fails and sudo probe succeeds, execvp is called
+    with sudo -n prefix."""
     from hermes_cli.main import _exec_in_container
 
-    container_info = {
-        "backend": "docker",
-        "container_name": "hermes-agent",
-        "exec_user": "hermes",
-        "hermes_bin": "/data/current-package/bin/hermes",
-    }
+    def which_side_effect(name):
+        if name == "podman":
+            return "/usr/bin/podman"
+        if name == "sudo":
+            return "/usr/bin/sudo"
+        return None
 
-    with patch("shutil.which", return_value="/usr/bin/docker"), \
+    with patch("shutil.which", side_effect=which_side_effect), \
          patch("subprocess.run") as mock_run, \
          patch("sys.stdin") as mock_stdin, \
-         patch("sys.stderr"), \
-         patch("time.sleep") as mock_sleep, \
-         pytest.raises(SystemExit) as exc_info:
+         patch("os.execvp") as mock_execvp:
         mock_stdin.isatty.return_value = True
-        # Probe succeeds (container visible), exec returns 125 (container stopped mid-run)
-        mock_run.side_effect = [MagicMock(returncode=0)] + \
-            [MagicMock(returncode=125)] * 5
-        _exec_in_container(container_info, ["chat"])
+        mock_run.side_effect = [
+            MagicMock(returncode=1),  # direct probe fails
+            MagicMock(returncode=0),  # sudo probe succeeds
+        ]
 
-    assert mock_sleep.call_count == 4  # 5 exec attempts, 4 sleeps
+        _exec_in_container(podman_container_info, ["chat"])
+
+    mock_execvp.assert_called_once()
+    cmd = mock_execvp.call_args[0][1]
+    assert cmd[0] == "/usr/bin/sudo"
+    assert cmd[1] == "-n"
+    assert cmd[2] == "/usr/bin/podman"
+    assert cmd[3] == "exec"
+
+
+def test_exec_in_container_probe_timeout_prints_message(docker_container_info):
+    """TimeoutExpired from probe produces a human-readable error, not a
+    raw traceback."""
+    from hermes_cli.main import _exec_in_container
+
+    with patch("shutil.which", return_value="/usr/bin/docker"), \
+         patch("subprocess.run", side_effect=subprocess.TimeoutExpired(
+             cmd=["docker", "inspect"], timeout=15)), \
+         patch("os.execvp") as mock_execvp, \
+         pytest.raises(SystemExit) as exc_info:
+        _exec_in_container(docker_container_info, ["chat"])
+
+    mock_execvp.assert_not_called()
     assert exc_info.value.code == 1
 
 
-def test_exec_in_container_non_tty_retries_silently_exits_126():
-    """Non-TTY mode retries on container failures then exits 126."""
+def test_exec_in_container_container_not_running_no_sudo(docker_container_info):
+    """When runtime exists but container not found and no sudo available,
+    prints helpful error about root containers."""
     from hermes_cli.main import _exec_in_container
 
-    container_info = {
-        "backend": "docker",
-        "container_name": "hermes-agent",
-        "exec_user": "hermes",
-        "hermes_bin": "/data/current-package/bin/hermes",
-    }
+    def which_side_effect(name):
+        if name == "docker":
+            return "/usr/bin/docker"
+        return None
 
-    with patch("shutil.which", return_value="/usr/bin/docker"), \
+    with patch("shutil.which", side_effect=which_side_effect), \
          patch("subprocess.run") as mock_run, \
-         patch("sys.stdin") as mock_stdin, \
-         patch("sys.stderr"), \
-         patch("time.sleep") as mock_sleep, \
+         patch("os.execvp") as mock_execvp, \
          pytest.raises(SystemExit) as exc_info:
-        mock_stdin.isatty.return_value = False
-        # Probe succeeds, exec returns 126 repeatedly
-        mock_run.side_effect = [MagicMock(returncode=0)] + \
-            [MagicMock(returncode=126)] * 10
-        _exec_in_container(container_info, ["sessions", "list"])
+        mock_run.return_value = MagicMock(returncode=1)
 
-    assert mock_sleep.call_count == 9  # 10 exec attempts, 9 sleeps
-    assert exc_info.value.code == 126
+        _exec_in_container(docker_container_info, ["chat"])
 
-
-def test_exec_in_container_propagates_hermes_exit_code():
-    """Non-zero exit from hermes inside container is propagated, not retried."""
-    from hermes_cli.main import _exec_in_container
-
-    container_info = {
-        "backend": "docker",
-        "container_name": "hermes-agent",
-        "exec_user": "hermes",
-        "hermes_bin": "/data/current-package/bin/hermes",
-    }
-
-    with patch("shutil.which", return_value="/usr/bin/docker"), \
-         patch("subprocess.run") as mock_run, \
-         patch("sys.stdin") as mock_stdin, \
-         patch("time.sleep") as mock_sleep, \
-         pytest.raises(SystemExit) as exc_info:
-        mock_stdin.isatty.return_value = True
-        # Probe succeeds (returncode=0), exec returns 1 (hermes error)
-        mock_run.side_effect = [
-            MagicMock(returncode=0),  # probe
-            MagicMock(returncode=1),  # exec — hermes error, not docker failure
-        ]
-        _exec_in_container(container_info, ["chat"])
-
-    mock_sleep.assert_not_called()  # No retries
-    assert mock_run.call_count == 2  # probe + one exec attempt
+    mock_execvp.assert_not_called()
     assert exc_info.value.code == 1
