@@ -2824,6 +2824,7 @@ class GatewayRunner:
                     image_paths,
                 )
 
+            self._pending_voice_transcript = None
             if audio_paths:
                 message_text = await self._enrich_message_with_transcription(
                     message_text,
@@ -3628,6 +3629,10 @@ class GatewayRunner:
                         )
                 return None
 
+            if response and getattr(self, "_pending_voice_transcript", None):
+                response = f"🎙 「{self._pending_voice_transcript}」
+
+{response}"
             return response
             
         except Exception as e:
@@ -6751,6 +6756,7 @@ class GatewayRunner:
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
+                    self._pending_voice_transcript = transcript
                     enriched_parts.append(
                         f'[The user sent a voice message~ '
                         f'Here\'s what they said: "{transcript}"]'
