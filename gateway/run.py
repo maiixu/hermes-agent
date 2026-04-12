@@ -2808,6 +2808,7 @@ class GatewayRunner:
         if _is_shared_thread and source.user_name:
             message_text = f"[{source.user_name}] {message_text}"
 
+        self._pending_voice_transcript = None
         if event.media_urls:
             image_paths = []
             audio_paths = []
@@ -2824,7 +2825,6 @@ class GatewayRunner:
                     image_paths,
                 )
 
-            self._pending_voice_transcript = None
             if audio_paths:
                 message_text = await self._enrich_message_with_transcription(
                     message_text,
