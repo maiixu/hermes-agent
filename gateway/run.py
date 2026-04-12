@@ -3630,9 +3630,7 @@ class GatewayRunner:
                 return None
 
             if response and getattr(self, "_pending_voice_transcript", None):
-                response = f"🎙 「{self._pending_voice_transcript}」
-
-{response}"
+                response = "🎙 「" + self._pending_voice_transcript + "」\n\n" + response
             return response
             
         except Exception as e:
