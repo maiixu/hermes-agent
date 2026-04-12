@@ -89,6 +89,34 @@ _local_model: Optional[object] = None
 _local_model_name: Optional[str] = None
 
 # ---------------------------------------------------------------------------
+# Hotwords / initial_prompt helpers
+# ---------------------------------------------------------------------------
+
+_HOTWORDS_PATH = Path.home() / ".hermes" / "stt_hotwords.txt"
+
+
+def _load_initial_prompt() -> Optional[str]:
+    """Load hotwords from ~/.hermes/stt_hotwords.txt and return as a comma-separated
+    string suitable for Whisper's ``initial_prompt`` / ``prompt`` parameter.
+
+    Lines starting with ``#`` and blank lines are ignored.
+    Returns ``None`` if the file is missing or empty.
+    """
+    try:
+        if not _HOTWORDS_PATH.exists():
+            return None
+        words = [
+            line.strip()
+            for line in _HOTWORDS_PATH.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        if not words:
+            return None
+        return ", ".join(words)
+    except Exception:
+        return None
+
+# ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
 
@@ -334,6 +362,9 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
         transcribe_kwargs = {"beam_size": 5}
         if _forced_lang:
             transcribe_kwargs["language"] = _forced_lang
+        _initial_prompt = _load_initial_prompt()
+        if _initial_prompt:
+            transcribe_kwargs["initial_prompt"] = _initial_prompt
 
         segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
         transcript = " ".join(segment.text.strip() for segment in segments)
@@ -460,11 +491,13 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, timeout=30, max_retries=0)
         try:
+            _prompt = _load_initial_prompt()
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     model=model_name,
                     file=audio_file,
                     response_format="text",
+                    **({"prompt": _prompt} if _prompt else {}),
                 )
 
             transcript_text = str(transcription).strip()
@@ -517,11 +550,13 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
         from openai import OpenAI, APIError, APIConnectionError, APITimeoutError
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=30, max_retries=0)
         try:
+            _prompt = _load_initial_prompt()
             with open(file_path, "rb") as audio_file:
                 transcription = client.audio.transcriptions.create(
                     model=model_name,
                     file=audio_file,
                     response_format="text" if model_name == "whisper-1" else "json",
+                    **({"prompt": _prompt} if _prompt else {}),
                 )
 
             transcript_text = _extract_transcript_text(transcription)
