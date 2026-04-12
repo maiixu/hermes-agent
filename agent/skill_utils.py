@@ -228,9 +228,24 @@ def get_all_skills_dirs() -> List[Path]:
     """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
 
     The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    yet — callers handle that).  If ``skills.create_dir`` is configured and
+    differs from the default, it is inserted second so created skills are found.
+    External dirs follow in config order.
     """
-    dirs = [get_skills_dir()]
+    default = get_skills_dir()
+    dirs: List[Path] = [default]
+
+    # Include create_dir in the read path if it differs from the default
+    try:
+        from hermes_cli.config import load_config
+        raw = load_config().get("skills", {}).get("create_dir", "")
+        if raw:
+            create_dir = Path(raw).expanduser().resolve()
+            if create_dir != default.resolve() and create_dir not in dirs:
+                dirs.insert(1, create_dir)
+    except Exception:
+        pass
+
     dirs.extend(get_external_skills_dirs())
     return dirs
 

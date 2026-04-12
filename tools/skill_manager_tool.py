@@ -76,9 +76,28 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
 import yaml
 
 
-# All skills live in ~/.hermes/skills/ (single source of truth)
+# Default write location for new skills.  Override via skills.create_dir in config.yaml.
 HERMES_HOME = get_hermes_home()
-SKILLS_DIR = HERMES_HOME / "skills"
+_DEFAULT_SKILLS_DIR = HERMES_HOME / "skills"
+
+
+def _get_skills_create_dir() -> Path:
+    """Return the directory where new skills are written.
+
+    Reads ``skills.create_dir`` from config.yaml.  Falls back to the default
+    ``~/.hermes/skills/`` when unset, so existing setups are unaffected.
+    """
+    try:
+        from hermes_cli.config import load_config
+        raw = load_config().get("skills", {}).get("create_dir", "")
+        if raw:
+            return Path(raw).expanduser().resolve()
+    except Exception:
+        pass
+    return _DEFAULT_SKILLS_DIR
+
+
+SKILLS_DIR = _get_skills_create_dir()
 
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
