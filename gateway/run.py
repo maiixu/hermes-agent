@@ -7453,6 +7453,14 @@ class GatewayRunner:
                         )
                         _stream_delta_cb = _stream_consumer.on_delta
                         stream_consumer_holder[0] = _stream_consumer
+                        # Seed voice transcript prefix so streaming messages also
+                        # show 🎙 「…」 at the top.  The non-streaming path adds
+                        # this at line 3632; in the streaming path we inject it
+                        # as the first delta so it becomes the start of the
+                        # first edit.
+                        _vt = getattr(self, "_pending_voice_transcript", None)
+                        if _vt:
+                            _stream_consumer.on_delta(f"🎙 「{_vt}」\n\n")
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 

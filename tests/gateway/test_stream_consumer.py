@@ -505,3 +505,68 @@ class TestSegmentBreakOnToolBoundary:
         assert len(sent_texts) == 3
         assert sent_texts[0].startswith(prefix)
         assert sum(len(t) for t in sent_texts[1:]) == len(tail)
+
+
+# ── Voice transcript prefix in streaming mode ────────────────────────────
+
+
+class TestVoiceTranscriptPrefix:
+    """Verify that a voice transcript seeded before the stream starts
+    appears at the top of the first streamed message.
+
+    This covers the fix for the bug where streaming mode silently
+    dropped the 🎙 「…」 prefix that non-streaming mode always prepended.
+    """
+
+    @pytest.mark.asyncio
+    async def test_transcript_prefix_in_first_message(self):
+        """🎙 prefix seeded via on_delta is the start of the first sent message."""
+        adapter = MagicMock()
+        send_result = SimpleNamespace(success=True, message_id="msg_1")
+        edit_result = SimpleNamespace(success=True)
+        adapter.send = AsyncMock(return_value=send_result)
+        adapter.edit_message = AsyncMock(return_value=edit_result)
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        # Gateway seeds transcript before agent starts (run.py fix)
+        consumer.on_delta("🎙 「hello from voice」\n\n")
+        consumer.on_delta("The answer is 42.")
+        consumer.finish()
+
+        await consumer.run()
+
+        all_texts = (
+            [c[1].get("content", "") for c in adapter.send.call_args_list]
+            + [c[1].get("content", "") for c in adapter.edit_message.call_args_list]
+        )
+        assert all_texts, "Expected at least one send/edit"
+        # The first call must start with the voice transcript header
+        assert all_texts[0].startswith("🎙 「hello from voice」"), (
+            f"First message did not start with transcript prefix: {all_texts[0]!r}"
+        )
+        # The response text must also appear somewhere
+        assert any("42" in t for t in all_texts)
+
+    @pytest.mark.asyncio
+    async def test_no_prefix_for_text_messages(self):
+        """Without a seeded transcript, the first message starts with agent text."""
+        adapter = MagicMock()
+        send_result = SimpleNamespace(success=True, message_id="msg_1")
+        adapter.send = AsyncMock(return_value=send_result)
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(success=True))
+        adapter.MAX_MESSAGE_LENGTH = 4096
+
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5)
+        consumer = GatewayStreamConsumer(adapter, "chat_123", config)
+
+        # No transcript seeded — plain text message
+        consumer.on_delta("Sure, here is the answer.")
+        consumer.finish()
+
+        await consumer.run()
+
+        first_text = adapter.send.call_args_list[0][1]["content"]
+        assert "🎙" not in first_text
