@@ -560,9 +560,10 @@ DEFAULT_CONFIG = {
     
     # Skills — external skill directories for sharing skills across tools/agents.
     # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
-    # always goes to ~/.hermes/skills/.
+    # goes to ``skills.create_dir`` (default: ``~/.hermes/skills/``).
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
+        "create_dir": "",      # where new skills are written; empty = ~/.hermes/skills/
     },
 
     # Honcho AI-native memory -- reads ~/.honcho/config.json as single source of truth.
