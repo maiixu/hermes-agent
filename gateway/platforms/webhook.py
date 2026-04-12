@@ -359,6 +359,25 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "ignored", "event": event_type}
             )
 
+        # Check sender allowlist — drop events from unauthorized senders
+        # before running the agent (security + cost control).
+        sender_allowlist = route_config.get("sender_allowlist", [])
+        if sender_allowlist:
+            sender_login = (
+                payload.get("sender", {}).get("login", "")
+                if isinstance(payload.get("sender"), dict)
+                else ""
+            )
+            if sender_login not in sender_allowlist:
+                logger.info(
+                    "[webhook] Ignoring event from sender \%s\ (not in allowlist) route=%s",
+                    sender_login,
+                    route_name,
+                )
+                return web.json_response(
+                    {"status": "ignored", "reason": "sender_not_allowed"}
+                )
+
         # Format prompt from template
         prompt_template = route_config.get("prompt", "")
         prompt = self._render_prompt(
