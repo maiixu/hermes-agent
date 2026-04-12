@@ -135,6 +135,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     "xiaomi": HermesOverlay(
         transport="openai_chat",
         base_url_env_var="XIAOMI_BASE_URL",
+    ),
     "bedrock": HermesOverlay(
         transport="bedrock_converse",
         extra_env_vars=("AWS_BEARER_TOKEN_BEDROCK",),

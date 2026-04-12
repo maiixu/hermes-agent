@@ -257,6 +257,7 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         inference_base_url="https://api.xiaomimimo.com/v1",
         api_key_env_vars=("XIAOMI_API_KEY",),
         base_url_env_var="XIAOMI_BASE_URL",
+    ),
     "bedrock": ProviderConfig(
         id="bedrock",
         name="Amazon Bedrock",
