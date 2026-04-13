@@ -367,8 +367,9 @@ class WebhookAdapter(BasePlatformAdapter):
             or "unknown"
         )
         allowed_events = route_config.get("events", [])
+        logger.info("[webhook] received event_type=%s route=%s", event_type, route_name)
         if allowed_events and event_type not in allowed_events:
-            logger.debug(
+            logger.info(
                 "[webhook] Ignoring event %s for route %s (allowed: %s)",
                 event_type,
                 route_name,
@@ -398,6 +399,10 @@ class WebhookAdapter(BasePlatformAdapter):
                 )
 
         # Format prompt from template
+        # Inject event_type/route into payload so {event_type} substitutes correctly
+        payload = dict(payload)
+        payload.setdefault("event_type", event_type)
+        payload.setdefault("route_name", route_name)
         prompt_template = route_config.get("prompt", "")
         prompt = self._render_prompt(
             prompt_template, payload, event_type, route_name
