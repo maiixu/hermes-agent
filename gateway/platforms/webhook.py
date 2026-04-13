@@ -763,7 +763,7 @@ class WebhookAdapter(BasePlatformAdapter):
         """Fetch PR title, body, diff, review comments, and linked issue."""
         import shlex
 
-        bot_env = "source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes"
+        bot_env = "source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes 2>/dev/null"
 
         async def run_gh(cmd: str) -> subprocess.CompletedProcess:
             full = f"bash -c {shlex.quote(bot_env + ' && ' + cmd)}"
@@ -936,13 +936,14 @@ class WebhookAdapter(BasePlatformAdapter):
             ["bash", "-c", cmd],
             capture_output=True, text=True, timeout=60,
         )
+        stdout = result.stdout or ""
         if result.returncode == 0:
             logger.info("[webhook_action] Merged PR %s#%d", repo, pr_num)
             await self._post_pr_comment(repo, pr_num, "✅ Merged and branch deleted.")
             return SendResult(success=True)
 
         stderr = result.stderr.lower()
-        if "conflict" in stderr or "merge conflict" in stderr:
+        if any(kw in stderr.lower() or kw in stdout.lower() for kw in ("conflict", "not mergeable", "cannot be cleanly", "unmergeable", "merge_conflict")):
             logger.info(
                 "[webhook_action] Conflict detected on %s#%d, attempting CC resolution",
                 repo, pr_num,
@@ -1147,7 +1148,7 @@ PR #{pr_num}: {ctx.get('title', '')}
         from pathlib import Path
 
         logger.info("[webhook_action] Replying to issue %s#%d", repo, issue_num)
-        bot_env = "source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes"
+        bot_env = "source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes 2>/dev/null"
 
         issue_result = await asyncio.to_thread(
             subprocess.run,
