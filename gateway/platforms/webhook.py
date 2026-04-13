@@ -69,7 +69,7 @@ class WebhookAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.WEBHOOK)
         self._host: str = config.extra.get("host", DEFAULT_HOST)
         self._port: int = int(config.extra.get("port", DEFAULT_PORT))
-        self._global_secret: str = config.extra.get("secret", "")
+        self._global_secret: str = self._resolve_secret(config.extra.get("secret", ""), config.extra.get("secret_env", ""))
         self._static_routes: Dict[str, dict] = config.extra.get("routes", {})
         self._dynamic_routes: Dict[str, dict] = {}
         self._dynamic_routes_mtime: float = 0.0
@@ -109,13 +109,26 @@ class WebhookAdapter(BasePlatformAdapter):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def connect(self) -> bool:
+    @staticmethod
+    def _resolve_secret(secret: str, secret_env: str) -> str:
+        """Return secret value, falling back to an env var.
+
+        If ``secret`` is non-empty, use it directly.
+        If ``secret_env`` names an env var, read it from the environment.
+        """
+        if secret:
+            return secret
+        if secret_env:
+            return os.environ.get(secret_env, "")
+        return ""
+
+        async def connect(self) -> bool:
         # Load agent-created subscriptions before validating
         self._reload_dynamic_routes()
 
         # Validate routes at startup — secret is required per route
         for name, route in self._routes.items():
-            secret = route.get("secret", self._global_secret)
+            secret = self._resolve_secret(route.get("secret", ""), route.get("secret_env", "")) or self._global_secret
             if not secret:
                 raise ValueError(
                     f"[webhook] Route '{name}' has no HMAC secret. "
@@ -314,7 +327,7 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response({"error": "Bad request"}, status=400)
 
         # Validate HMAC signature (skip for INSECURE_NO_AUTH testing mode)
-        secret = route_config.get("secret", self._global_secret)
+        secret = self._resolve_secret(route_config.get("secret", ""), route_config.get("secret_env", "")) or self._global_secret
         if secret and secret != _INSECURE_NO_AUTH:
             if not self._validate_signature(request, raw_body, secret):
                 logger.warning(
