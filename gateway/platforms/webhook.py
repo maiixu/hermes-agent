@@ -718,6 +718,57 @@ class WebhookAdapter(BasePlatformAdapter):
     # GitHub Action delivery
     # ------------------------------------------------------------------
 
+
+    async def _notify_failure(
+        self, ref: str, context: str, stdout: str, exit_code: int, timed_out: bool = False
+    ) -> None:
+        """Analyze CC failure with Haiku and send Telegram notification."""
+        import tempfile as _tmp
+        mode = "timed out (30 min)" if timed_out else f"exit {exit_code}"
+        analysis_prompt = (
+            f"CC subprocess {mode}.\nContext: {context}\n"
+            f"Output (last 1500 chars):\n{stdout[-1500:]}\n\n"
+            "Summarize in 3 short lines:\n"
+            "1. What was accomplished\n"
+            "2. Where it stopped / what failed\n"
+            "3. Concrete next step for the user\n"
+            "Be specific. Max 60 words total."
+        )
+        import shlex as _shlex
+        cmd = (
+            "source ~/code/personal-intelligence/scripts/setup-bot-env.sh claude 2>/dev/null && "
+            "AWS_PROFILE=bedrock-claude AWS_REGION=us-west-2 CLAUDE_CODE_USE_BEDROCK=1 "
+            "/opt/homebrew/bin/claude -p " + _shlex.quote(analysis_prompt) + " "
+            "--model us.anthropic.claude-haiku-4-5-20251001 "
+            "--output-format json --no-session-persistence 2>/dev/null"
+        )
+        analysis = ""
+        try:
+            with _tmp.TemporaryDirectory() as _td:
+                r = await asyncio.to_thread(
+                    subprocess.run, ["bash", "-c", cmd],
+                    capture_output=True, text=True, timeout=60, cwd=_td
+                )
+                analysis = json.loads(r.stdout).get("result", "").strip()
+        except Exception as _e:
+            logger.warning("[webhook_action] Haiku analysis failed: %s", _e)
+            analysis = stdout[-300:] if stdout else "(no output)"
+
+        msg = f"⚠️ *{ref}* — {mode}\n\n{analysis}"
+        logger.warning("[webhook_action] Failure notification: %s", msg[:200])
+
+        if self.gateway_runner:
+            try:
+                from gateway.platforms.base import Platform as _Plat
+                tg = self.gateway_runner.adapters.get(_Plat.TELEGRAM)
+                if tg:
+                    home = self.gateway_runner.config.get_home_channel(_Plat.TELEGRAM)
+                    if home:
+                        await tg.send(home.chat_id, msg)
+                        return
+            except Exception as _e2:
+                logger.warning("[webhook_action] Telegram send failed: %s", _e2)
+
     async def _deliver_github_action(
         self, content: str, delivery: dict
     ) -> SendResult:
@@ -1116,10 +1167,22 @@ PR #{pr_num}: {ctx.get('title', '')}
 
             cc_result = await self._spawn_cc(prompt, tmpdir)
 
+        timed_out = cc_result.get("timed_out", False)
+        if timed_out or (cc_result.get("exit_code", 0) != 0 and not cc_result.get("blocked")):
+            await self._notify_failure(
+                f"PR #{pr_num} in {repo}", "address_comments",
+                cc_result.get("output", ""), cc_result.get("exit_code", -1), timed_out
+            )
+            return SendResult(success=False, error="CC incomplete")
+
         if cc_result["blocked"]:
             await self._post_pr_comment(
                 repo, pr_num,
                 f"🚫 Could not address comments: {cc_result['blocked']}"
+            )
+            await self._notify_failure(
+                f"PR #{pr_num} in {repo}", "address_comments — blocked",
+                cc_result.get("output", ""), 0
             )
             return SendResult(success=False, error=cc_result["blocked"])
 
