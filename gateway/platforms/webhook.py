@@ -30,7 +30,10 @@ import logging
 import os
 import re
 import subprocess
+import shlex
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -198,6 +201,9 @@ class WebhookAdapter(BasePlatformAdapter):
 
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
+
+        if deliver_type == "github_action":
+            return await self._deliver_github_action(content, delivery)
 
         # Cross-platform delivery — any platform with a gateway adapter
         if self.gateway_runner and deliver_type in (
@@ -702,3 +708,499 @@ class WebhookAdapter(BasePlatformAdapter):
             metadata = {"thread_id": thread_id}
 
         return await adapter.send(chat_id, content, metadata=metadata)
+
+    # ------------------------------------------------------------------
+    # GitHub Action delivery
+    # ------------------------------------------------------------------
+
+    async def _deliver_github_action(
+        self, content: str, delivery: dict
+    ) -> SendResult:
+        """Parse ACTION directive from agent response and execute it."""
+        match = re.search(
+            r"ACTION:\s*(\w+)((?:\s+\w+=\S+)+)", content
+        )
+        if not match:
+            logger.info(
+                "[webhook_action] No ACTION found in response — treating as ignored"
+            )
+            return SendResult(success=True)
+
+        action_type = match.group(1)
+        params_raw = match.group(2).strip()
+        params = dict(re.findall(r"(\w+)=(\S+)", params_raw))
+        repo = params.get("repo", "")
+        logger.info(
+            "[webhook_action] Parsed action=%s params=%s", action_type, params
+        )
+
+        try:
+            if action_type == "merge_pr":
+                pr_num = int(params.get("pr", 0))
+                return await self._action_merge_pr(repo, pr_num)
+            elif action_type == "address_comments":
+                pr_num = int(params.get("pr", 0))
+                return await self._action_address_comments(repo, pr_num, merge_after=False)
+            elif action_type == "address_and_merge":
+                pr_num = int(params.get("pr", 0))
+                return await self._action_address_comments(repo, pr_num, merge_after=True)
+            elif action_type == "reply_issue":
+                issue_num = int(params.get("issue", 0))
+                return await self._action_reply_issue(repo, issue_num)
+            else:
+                logger.warning("[webhook_action] Unknown action type: %s", action_type)
+                return SendResult(success=False, error=f"Unknown action: {action_type}")
+        except Exception as e:
+            logger.error("[webhook_action] Action failed: %s", e)
+            return SendResult(success=False, error=str(e))
+
+    async def _fetch_pr_context(self, repo: str, pr_num: int) -> dict:
+        """Fetch PR title, body, diff, review comments, and linked issue."""
+        import shlex
+
+        bot_env = "source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes"
+
+        async def run_gh(cmd: str) -> subprocess.CompletedProcess:
+            full = f"bash -c {shlex.quote(bot_env + ' && ' + cmd)}"
+            return await asyncio.to_thread(
+                subprocess.run,
+                full,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+        # PR title, body, branch
+        pr_result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c",
+             f"{bot_env} && gh pr view {pr_num} --repo {shlex.quote(repo)} "
+             f"--json title,body,headRefName"],
+            capture_output=True, text=True, timeout=60,
+        )
+        pr_data = {}
+        if pr_result.returncode == 0:
+            try:
+                pr_data = json.loads(pr_result.stdout)
+            except json.JSONDecodeError:
+                pass
+
+        # Diff
+        diff_result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c",
+             f"{bot_env} && gh pr diff {pr_num} --repo {shlex.quote(repo)}"],
+            capture_output=True, text=True, timeout=60,
+        )
+        diff_text = diff_result.stdout[:8000] if diff_result.returncode == 0 else ""
+
+        # Review comments (inline)
+        comments_result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c",
+             f"{bot_env} && gh api repos/{repo}/pulls/{pr_num}/comments"],
+            capture_output=True, text=True, timeout=60,
+        )
+        comments = []
+        if comments_result.returncode == 0:
+            try:
+                comments = json.loads(comments_result.stdout)
+            except json.JSONDecodeError:
+                pass
+
+        # Reviews (review-level bodies)
+        reviews_result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c",
+             f"{bot_env} && gh api repos/{repo}/pulls/{pr_num}/reviews"],
+            capture_output=True, text=True, timeout=60,
+        )
+        reviews = []
+        if reviews_result.returncode == 0:
+            try:
+                reviews = json.loads(reviews_result.stdout)
+            except json.JSONDecodeError:
+                pass
+
+        # Linked issue from PR body
+        linked_issue = None
+        pr_body = pr_data.get("body", "") or ""
+        issue_match = re.search(r"(?:Closes|Fixes|Resolves)\s+#(\d+)", pr_body, re.IGNORECASE)
+        if issue_match:
+            issue_num = issue_match.group(1)
+            issue_result = await asyncio.to_thread(
+                subprocess.run,
+                ["bash", "-c",
+                 f"{bot_env} && gh issue view {issue_num} --repo {shlex.quote(repo)} "
+                 f"--json title,body"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if issue_result.returncode == 0:
+                try:
+                    linked_issue = json.loads(issue_result.stdout)
+                    linked_issue["number"] = issue_num
+                except json.JSONDecodeError:
+                    pass
+
+        return {
+            "title": pr_data.get("title", ""),
+            "body": pr_body,
+            "branch": pr_data.get("headRefName", ""),
+            "diff": diff_text,
+            "comments": comments,
+            "reviews": reviews,
+            "linked_issue": linked_issue,
+        }
+
+    async def _spawn_cc(self, prompt: str, cwd: str, timeout: int = 1800) -> dict:
+        """Spawn a Claude Code headless session and return parsed output."""
+        import shlex
+
+        cmd = (
+            "source ~/code/personal-intelligence/scripts/setup-bot-env.sh claude && "
+            "AWS_PROFILE=bedrock-claude AWS_REGION=us-west-2 CLAUDE_CODE_USE_BEDROCK=1 "
+            f"/opt/homebrew/bin/claude -p {shlex.quote(prompt)} "
+            "--output-format json --no-session-persistence --dangerously-skip-permissions"
+        )
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c", cmd],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+        )
+        logger.info(
+            "[webhook_action] CC exit_code=%d stdout_len=%d",
+            result.returncode,
+            len(result.stdout),
+        )
+
+        output_text = ""
+        blocked_reason = None
+
+        if result.stdout:
+            try:
+                parsed = json.loads(result.stdout)
+                output_text = parsed.get("result", result.stdout)
+            except json.JSONDecodeError:
+                output_text = result.stdout
+
+        combined = output_text + "\n" + result.stderr
+        blocked_match = re.search(r"BLOCKED:\s*(.+)", combined)
+        if blocked_match:
+            blocked_reason = blocked_match.group(1).strip()
+
+        return {
+            "output": output_text,
+            "stderr": result.stderr,
+            "exit_code": result.returncode,
+            "blocked": blocked_reason,
+        }
+
+    async def _post_pr_comment(self, repo: str, pr_num: int, body: str) -> None:
+        """Post a comment on a PR as hermes-bot."""
+        import shlex
+
+        cmd = (
+            f"source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes && "
+            f"gh pr comment {pr_num} --repo {shlex.quote(repo)} --body {shlex.quote(body)}"
+        )
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c", cmd],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "[webhook_action] Failed to post PR comment: %s", result.stderr
+            )
+
+    async def _action_merge_pr(self, repo: str, pr_num: int) -> SendResult:
+        """Merge a PR using hermes-bot identity."""
+        import shlex
+
+        logger.info("[webhook_action] Merging PR %s#%d", repo, pr_num)
+        cmd = (
+            f"source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes && "
+            f"gh pr merge {pr_num} --repo {shlex.quote(repo)} --merge --delete-branch"
+        )
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c", cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            logger.info("[webhook_action] Merged PR %s#%d", repo, pr_num)
+            await self._post_pr_comment(repo, pr_num, "✅ Merged and branch deleted.")
+            return SendResult(success=True)
+
+        stderr = result.stderr.lower()
+        if "conflict" in stderr or "merge conflict" in stderr:
+            logger.info(
+                "[webhook_action] Conflict detected on %s#%d, attempting CC resolution",
+                repo, pr_num,
+            )
+            resolved = await self._resolve_conflict_and_merge(repo, pr_num)
+            if resolved:
+                return SendResult(success=True)
+
+        error_msg = result.stderr.strip()
+        logger.error("[webhook_action] Merge failed for %s#%d: %s", repo, pr_num, error_msg)
+        await self._post_pr_comment(repo, pr_num, f"❌ Merge failed: {error_msg}")
+        return SendResult(success=False, error=error_msg)
+
+    async def _resolve_conflict_and_merge(self, repo: str, pr_num: int) -> bool:
+        """Spawn CC to resolve merge conflicts, then retry merge."""
+        import shlex
+        import tempfile
+
+        ctx = await self._fetch_pr_context(repo, pr_num)
+        pr_branch = ctx.get("branch", "")
+        if not pr_branch:
+            logger.error("[webhook_action] Cannot resolve conflict: unknown branch")
+            return False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clone_cmd = (
+                f"source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes && "
+                f"gh repo clone {shlex.quote(repo)} {shlex.quote(tmpdir)} -- "
+                f"--depth=1 --branch={shlex.quote(pr_branch)}"
+            )
+            clone_result = await asyncio.to_thread(
+                subprocess.run,
+                ["bash", "-c", clone_cmd],
+                capture_output=True, text=True, timeout=120,
+            )
+            if clone_result.returncode != 0:
+                logger.error(
+                    "[webhook_action] Clone failed: %s", clone_result.stderr
+                )
+                return False
+
+            prompt = (
+                f"You are resolving merge conflicts in {repo} PR #{pr_num}.\n"
+                f"Branch: {pr_branch}\n\n"
+                "Resolve all merge conflicts, commit the resolution using the bot identity "
+                "already set in env vars, and push to the remote branch.\n"
+                "If you cannot resolve cleanly, output: BLOCKED: <reason>\n"
+                "When done, output: DONE"
+            )
+            cc_result = await self._spawn_cc(prompt, tmpdir)
+            if cc_result["blocked"]:
+                await self._post_pr_comment(
+                    repo, pr_num,
+                    f"❌ Conflict resolution blocked: {cc_result['blocked']}"
+                )
+                return False
+
+        # Retry merge after conflict resolution
+        import shlex as _shlex
+        retry_cmd = (
+            f"source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes && "
+            f"gh pr merge {pr_num} --repo {_shlex.quote(repo)} --merge --delete-branch"
+        )
+        retry_result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c", retry_cmd],
+            capture_output=True, text=True, timeout=60,
+        )
+        if retry_result.returncode == 0:
+            await self._post_pr_comment(repo, pr_num, "✅ Conflicts resolved and merged.")
+            return True
+        return False
+
+    async def _action_address_comments(
+        self, repo: str, pr_num: int, merge_after: bool
+    ) -> SendResult:
+        """Spawn CC to address PR review comments."""
+        import shlex
+        import tempfile
+        from pathlib import Path
+
+        logger.info(
+            "[webhook_action] Addressing comments on %s#%d merge_after=%s",
+            repo, pr_num, merge_after,
+        )
+
+        ctx = await self._fetch_pr_context(repo, pr_num)
+
+        soul_content = ""
+        try:
+            soul_content = Path("~/.hermes/SOUL.md").expanduser().read_text()
+        except Exception as e:
+            logger.warning("[webhook_action] Could not read SOUL.md: %s", e)
+
+        # Format unresolved review comments
+        comments_parts = []
+        for c in ctx.get("comments", []):
+            if c.get("position") is not None:  # unresolved inline comment
+                path = c.get("path", "")
+                body = c.get("body", "")
+                comments_parts.append(f"- `{path}`: {body}")
+
+        # Also include review-level comments
+        for r in ctx.get("reviews", []):
+            body = r.get("body", "").strip()
+            if body and r.get("state") in ("CHANGES_REQUESTED", "COMMENTED"):
+                reviewer = r.get("user", {}).get("login", "reviewer")
+                comments_parts.append(f"- [{reviewer} review]: {body}")
+
+        comments_text = "\n".join(comments_parts) if comments_parts else "(no inline comments)"
+
+        linked_issue_section = ""
+        if ctx.get("linked_issue"):
+            issue = ctx["linked_issue"]
+            linked_issue_section = (
+                f"## Linked Issue #{issue.get('number', '')}\n"
+                f"**{issue.get('title', '')}**\n\n{issue.get('body', '')}"
+            )
+
+        prompt = f"""You are hermes-bot-maiixu[bot], a GitHub automation bot.
+
+## Identity
+Git identity and GH_TOKEN are already set in your environment variables.
+Always commit as hermes-bot-maiixu[bot].
+
+## SOUL guidelines
+{soul_content}
+
+## Task
+Repository: {repo}
+PR #{pr_num}: {ctx.get('title', '')}
+
+{linked_issue_section}
+
+## PR Description
+{ctx.get('body', '')}
+
+## Review comments to address
+{comments_text}
+
+## Instructions
+1. Address every review comment listed above with the minimum necessary change
+2. Commit your changes using the bot identity already set in env vars
+3. Push to the remote branch
+4. Only modify files mentioned in the review comments
+5. If you encounter something you cannot resolve, output: BLOCKED: <reason>
+6. When complete, output: DONE"""
+
+        pr_branch = ctx.get("branch", "")
+        if not pr_branch:
+            logger.error("[webhook_action] Cannot address comments: unknown branch")
+            return SendResult(success=False, error="Unknown PR branch")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            clone_cmd = (
+                f"source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes && "
+                f"gh repo clone {shlex.quote(repo)} {shlex.quote(tmpdir)} -- "
+                f"--depth=1 --branch={shlex.quote(pr_branch)}"
+            )
+            clone_result = await asyncio.to_thread(
+                subprocess.run,
+                ["bash", "-c", clone_cmd],
+                capture_output=True, text=True, timeout=120,
+            )
+            if clone_result.returncode != 0:
+                logger.error(
+                    "[webhook_action] Clone failed: %s", clone_result.stderr
+                )
+                return SendResult(success=False, error=clone_result.stderr)
+
+            cc_result = await self._spawn_cc(prompt, tmpdir)
+
+        if cc_result["blocked"]:
+            await self._post_pr_comment(
+                repo, pr_num,
+                f"🚫 Could not address comments: {cc_result['blocked']}"
+            )
+            return SendResult(success=False, error=cc_result["blocked"])
+
+        if merge_after:
+            return await self._action_merge_pr(repo, pr_num)
+        else:
+            await self._post_pr_comment(
+                repo, pr_num,
+                "📝 Addressed review comments. Re-requesting review."
+            )
+            re_review_cmd = (
+                f"source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes && "
+                f"gh pr review {pr_num} --repo {shlex.quote(repo)} --request-review"
+            )
+            await asyncio.to_thread(
+                subprocess.run,
+                ["bash", "-c", re_review_cmd],
+                capture_output=True, text=True, timeout=30,
+            )
+            return SendResult(success=True)
+
+    async def _action_reply_issue(self, repo: str, issue_num: int) -> SendResult:
+        """Spawn CC to reply to a GitHub issue."""
+        import shlex
+        import tempfile
+        from pathlib import Path
+
+        logger.info("[webhook_action] Replying to issue %s#%d", repo, issue_num)
+        bot_env = "source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes"
+
+        issue_result = await asyncio.to_thread(
+            subprocess.run,
+            ["bash", "-c",
+             f"{bot_env} && gh issue view {issue_num} --repo {shlex.quote(repo)} "
+             f"--json title,body,comments"],
+            capture_output=True, text=True, timeout=60,
+        )
+        issue_data = {}
+        if issue_result.returncode == 0:
+            try:
+                issue_data = json.loads(issue_result.stdout)
+            except json.JSONDecodeError:
+                pass
+
+        soul_content = ""
+        try:
+            soul_content = Path("~/.hermes/SOUL.md").expanduser().read_text()
+        except Exception as e:
+            logger.warning("[webhook_action] Could not read SOUL.md: %s", e)
+
+        comments_text = ""
+        for c in issue_data.get("comments", []):
+            author = c.get("author", {}).get("login", "user")
+            body = c.get("body", "")
+            comments_text += f"\n**{author}**: {body}\n"
+
+        prompt = f"""You are hermes-bot-maiixu[bot], a GitHub automation bot.
+
+## Identity
+Git identity and GH_TOKEN are already set in your environment variables.
+
+## SOUL guidelines
+{soul_content}
+
+## Task
+Reply to GitHub issue {repo}#{issue_num}.
+
+## Issue: {issue_data.get('title', '')}
+{issue_data.get('body', '')}
+
+## Existing comments
+{comments_text or '(none)'}
+
+## Instructions
+1. Post a thoughtful, helpful reply to the issue using:
+   gh issue comment {issue_num} --repo {shlex.quote(repo)} --body '<your reply>'
+2. Be concise and address the issue directly
+3. When complete, output: DONE"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cc_result = await self._spawn_cc(prompt, tmpdir)
+
+        if cc_result["blocked"]:
+            logger.error(
+                "[webhook_action] reply_issue blocked: %s", cc_result["blocked"]
+            )
+            return SendResult(success=False, error=cc_result["blocked"])
+
+        return SendResult(success=True)
+
