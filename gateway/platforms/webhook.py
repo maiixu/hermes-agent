@@ -122,7 +122,7 @@ class WebhookAdapter(BasePlatformAdapter):
             return os.environ.get(secret_env, "")
         return ""
 
-        async def connect(self) -> bool:
+    async def connect(self) -> bool:
         # Load agent-created subscriptions before validating
         self._reload_dynamic_routes()
 
@@ -383,7 +383,7 @@ class WebhookAdapter(BasePlatformAdapter):
             )
             if sender_login not in sender_allowlist:
                 logger.info(
-                    "[webhook] Ignoring event from sender \%s\ (not in allowlist) route=%s",
+                    "[webhook] Ignoring event from sender '%s' (not in allowlist) route=%s",
                     sender_login,
                     route_name,
                 )
