@@ -1193,15 +1193,27 @@ PR #{pr_num}: {ctx.get('title', '')}
                 repo, pr_num,
                 "📝 Addressed review comments. Re-requesting review."
             )
+            # Re-request review via REST API using hermes-bot token.
+            # Use gh api (not gh pr review) so GH_TOKEN is respected explicitly
+            # and there is no silent fallback to personal auth.
             re_review_cmd = (
-                f"source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes && "
-                f"gh pr review {pr_num} --repo {shlex.quote(repo)} --request-review"
+                "source ~/code/personal-intelligence/scripts/setup-bot-env.sh hermes 2>/dev/null && "
+                + f'if [ -z "$GH_TOKEN" ]; then echo "hermes-bot token empty, cannot re-request review" >&2; exit 1; fi && '
+                + f'GH_TOKEN=$GH_TOKEN gh api repos/{shlex.quote(repo)}/pulls/{pr_num}/requested_reviewers '
+                + "-X POST -f 'reviewers[]=maiixu'"
             )
-            await asyncio.to_thread(
+            rr_result = await asyncio.to_thread(
                 subprocess.run,
                 ["bash", "-c", re_review_cmd],
                 capture_output=True, text=True, timeout=30,
             )
+            if rr_result.returncode != 0:
+                logger.error(
+                    "[webhook_action] Re-request review failed for %s#%d: %s",
+                    repo, pr_num, rr_result.stderr[:200]
+                )
+            else:
+                logger.info("[webhook_action] Re-requested review on %s#%d", repo, pr_num)
             return SendResult(success=True)
 
     async def _action_reply_issue(self, repo: str, issue_num: int) -> SendResult:
