@@ -306,6 +306,185 @@ class TestEventFilter:
 
 
 # ===================================================================
+# Sender allowlist
+# ===================================================================
+
+
+class TestSenderAllowlist:
+    """Tests for sender_allowlist filtering in _handle_webhook.
+
+    The allowlist is checked after event-type filtering.  When configured,
+    only senders whose ``sender.login`` appears in the list are allowed
+    through; all others receive a 200 with status=ignored.
+    """
+
+    @pytest.mark.asyncio
+    async def test_allowlist_blocks_unauthorized_sender(self):
+        """Sender not in allowlist is blocked with status=ignored."""
+        routes = {
+            "secured": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "test",
+                "sender_allowlist": ["trusted-bot"],
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/secured",
+                json={"action": "opened", "sender": {"login": "random-user"}},
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["status"] == "ignored"
+            assert data["reason"] == "sender_not_allowed"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_allows_authorized_sender(self):
+        """Sender in allowlist passes through and triggers the agent."""
+        routes = {
+            "secured": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "action={action}",
+                "sender_allowlist": ["trusted-bot"],
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/secured",
+                json={"action": "opened", "sender": {"login": "trusted-bot"}},
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            assert data["status"] == "accepted"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_empty_allows_all_senders(self):
+        """No sender_allowlist configured → any sender is accepted."""
+        routes = {
+            "open": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "test",
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/open",
+                json={"action": "opened", "sender": {"login": "anyone"}},
+            )
+            assert resp.status == 202
+
+    @pytest.mark.asyncio
+    async def test_allowlist_blocks_missing_sender_field(self):
+        """Payload without a sender field → empty login → blocked by allowlist."""
+        routes = {
+            "secured": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "test",
+                "sender_allowlist": ["trusted-bot"],
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/secured",
+                json={"action": "opened"},  # no sender key
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["status"] == "ignored"
+            assert data["reason"] == "sender_not_allowed"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_blocks_non_dict_sender(self):
+        """sender is a non-dict value → empty login → blocked by allowlist."""
+        routes = {
+            "secured": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "test",
+                "sender_allowlist": ["trusted-bot"],
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/secured",
+                json={"action": "opened", "sender": "trusted-bot"},  # string, not dict
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["status"] == "ignored"
+            assert data["reason"] == "sender_not_allowed"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_multiple_senders_any_match_passes(self):
+        """Any sender in the allowlist is accepted."""
+        routes = {
+            "secured": {
+                "secret": _INSECURE_NO_AUTH,
+                "prompt": "test",
+                "sender_allowlist": ["bot-a", "bot-b", "human"],
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            for login in ["bot-a", "bot-b", "human"]:
+                resp = await cli.post(
+                    "/webhooks/secured",
+                    json={"action": "opened", "sender": {"login": login}},
+                    headers={"X-GitHub-Delivery": f"d-{login}"},
+                )
+                assert resp.status == 202, f"Expected {login} to be allowed"
+
+    @pytest.mark.asyncio
+    async def test_allowlist_checked_after_event_filter(self):
+        """Event type is filtered before sender_allowlist is evaluated.
+
+        An ignored event type must still return 200 ignored (not 200
+        sender_not_allowed), even when the sender is not in the allowlist.
+        """
+        routes = {
+            "strict": {
+                "secret": _INSECURE_NO_AUTH,
+                "events": ["pull_request"],
+                "prompt": "test",
+                "sender_allowlist": ["trusted-bot"],
+            }
+        }
+        adapter = _make_adapter(routes=routes)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/strict",
+                json={"action": "pushed", "sender": {"login": "random-user"}},
+                headers={"X-GitHub-Event": "push"},  # not in events list
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            # Should be filtered by event type first, not by allowlist
+            assert data["status"] == "ignored"
+            assert "reason" not in data  # event filter, not allowlist
+
+
+# ===================================================================
 # HTTP handling
 # ===================================================================
 

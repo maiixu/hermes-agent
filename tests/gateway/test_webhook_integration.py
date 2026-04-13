@@ -337,3 +337,126 @@ class TestGitHubCommentDelivery:
         # Delivery info is retained after send() so interim status messages
         # don't strand the final response (TTL-based cleanup happens on POST).
         assert chat_id in adapter._delivery_info
+
+
+# ===================================================================
+# Test 5: sender_allowlist end-to-end with real HMAC signature
+# ===================================================================
+
+class TestSenderAllowlistIntegration:
+    """End-to-end tests for sender_allowlist with real GitHub HMAC signatures.
+
+    These tests verify the full pipeline: signature validation → event
+    filtering → sender allowlist → agent dispatch.  Both the allowed and
+    blocked paths must behave correctly without touching agent internals.
+    """
+
+    _SECRET = "integration-test-secret"
+
+    def _make_routes(self, allowlist):
+        return {
+            "github-pr": {
+                "secret": self._SECRET,
+                "events": ["pull_request"],
+                "prompt": "Review PR #{number} by {sender.login}",
+                "deliver": "log",
+                "sender_allowlist": allowlist,
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_sender_blocked_agent_never_called(self):
+        """Unauthorized sender → 200 ignored, handle_message never called."""
+        payload = {**GITHUB_PR_PAYLOAD, "sender": {"login": "random-outsider"}}
+        body = json.dumps(payload).encode()
+        sig = _github_signature(body, self._SECRET)
+
+        adapter = _make_adapter(self._make_routes(["trusted-bot"]))
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github-pr",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Event": "pull_request",
+                    "X-Hub-Signature-256": sig,
+                    "X-GitHub-Delivery": "integ-blocked-001",
+                },
+            )
+            assert resp.status == 200
+            data = await resp.json()
+            assert data["status"] == "ignored"
+            assert data["reason"] == "sender_not_allowed"
+
+        await asyncio.sleep(0.05)
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_authorized_sender_allowed_agent_called(self):
+        """Authorized sender → 202 accepted, handle_message called once."""
+        payload = {**GITHUB_PR_PAYLOAD, "sender": {"login": "trusted-bot"}}
+        body = json.dumps(payload).encode()
+        sig = _github_signature(body, self._SECRET)
+
+        captured_events: list[MessageEvent] = []
+
+        adapter = _make_adapter(self._make_routes(["trusted-bot"]))
+
+        async def _capture(event: MessageEvent):
+            captured_events.append(event)
+
+        adapter.handle_message = _capture
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github-pr",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Event": "pull_request",
+                    "X-Hub-Signature-256": sig,
+                    "X-GitHub-Delivery": "integ-allowed-001",
+                },
+            )
+            assert resp.status == 202
+            data = await resp.json()
+            assert data["status"] == "accepted"
+
+        await asyncio.sleep(0.05)
+
+        assert len(captured_events) == 1
+        event = captured_events[0]
+        assert "trusted-bot" in event.text
+        assert event.message_id == "integ-allowed-001"
+
+    @pytest.mark.asyncio
+    async def test_invalid_signature_rejected_before_allowlist(self):
+        """Bad HMAC signature is rejected with 401 before allowlist is checked.
+
+        Ensures the security check order is: auth → event filter → allowlist.
+        """
+        payload = {**GITHUB_PR_PAYLOAD, "sender": {"login": "trusted-bot"}}
+        body = json.dumps(payload).encode()
+
+        adapter = _make_adapter(self._make_routes(["trusted-bot"]))
+        adapter.handle_message = AsyncMock()
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/github-pr",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-GitHub-Event": "pull_request",
+                    "X-Hub-Signature-256": "sha256=deadbeef",  # wrong sig
+                    "X-GitHub-Delivery": "integ-bad-sig-001",
+                },
+            )
+            assert resp.status == 401
+
+        adapter.handle_message.assert_not_called()
