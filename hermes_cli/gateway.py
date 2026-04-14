@@ -1512,7 +1512,7 @@ def launchd_status(deep: bool = False):
 
 def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     """Run the gateway in foreground.
-    
+
     Args:
         verbose: Stderr log verbosity count added on top of default WARNING (0=WARNING, 1=INFO, 2+=DEBUG).
         quiet: Suppress all stderr log output.

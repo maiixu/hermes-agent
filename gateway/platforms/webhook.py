@@ -108,6 +108,14 @@ class WebhookAdapter(BasePlatformAdapter):
             config.extra.get("max_body_bytes", 1_048_576)
         )  # 1MB
 
+        # Limit concurrent Claude Code subprocesses.  Each _spawn_cc call
+        # holds stdout/stderr pipes open for the full CC session duration
+        # (up to 30 min), consuming ~3 FDs.  Without a cap, burst webhook
+        # traffic exhausts the OS file-descriptor limit (macOS default: 256).
+        self._cc_semaphore = asyncio.Semaphore(
+            int(config.extra.get("max_concurrent_cc", 4))
+        )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -919,14 +927,15 @@ class WebhookAdapter(BasePlatformAdapter):
             f"/opt/homebrew/bin/claude -p {shlex.quote(prompt)} "
             "--output-format json --no-session-persistence --dangerously-skip-permissions"
         )
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["bash", "-c", cmd],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=cwd,
-        )
+        async with self._cc_semaphore:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["bash", "-c", cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+            )
         logger.info(
             "[webhook_action] CC exit_code=%d stdout_len=%d",
             result.returncode,
