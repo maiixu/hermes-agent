@@ -6,6 +6,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 
 import asyncio
 import os
+import resource
 import shutil
 import signal
 import subprocess
@@ -1512,7 +1513,7 @@ def launchd_status(deep: bool = False):
 
 def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     """Run the gateway in foreground.
-    
+
     Args:
         verbose: Stderr log verbosity count added on top of default WARNING (0=WARNING, 1=INFO, 2+=DEBUG).
         quiet: Suppress all stderr log output.
@@ -1520,6 +1521,18 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
                  This prevents systemd restart loops when the old process
                  hasn't fully exited yet.
     """
+    # Raise the open-file-descriptor limit before spawning any subprocesses.
+    # The default macOS ulimit is 256, which is exhausted quickly when
+    # webhook_action runs multiple concurrent gh subprocesses (each
+    # capture_output=True subprocess consumes 2-3 FDs).
+    _TARGET_NOFILE = 10240
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < _TARGET_NOFILE:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(_TARGET_NOFILE, hard), hard))
+    except (ValueError, OSError):
+        pass  # Best-effort; hard limit may prevent raising to target
+
     sys.path.insert(0, str(PROJECT_ROOT))
     
     from gateway.run import start_gateway
